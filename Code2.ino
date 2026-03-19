@@ -7,18 +7,23 @@
 #include <Wire.h>
 
 bool needCalibration = false;
+bool isCalibrated = false;  
 
 volatile bool deviceConnected     = false;
 volatile bool previouslyConnected = false;  
 
 //Add PWM variables
 #define VIBRATION_PIN 26 // vibration motor connected to PIN 26
-#define PWM_CHANNEL 0
 #define PWM_FREQ 1000
 #define PWM_RESOLUTION 8
 
 int vibrationIntensity = 127;   // default 50% (PWM range 0–255)
-bool motorEnabled = false;
+
+// Vibration Pattern
+int currentPattern = 0;  // 0 = no pattern
+bool patternRunning = false;
+unsigned long patternTimer = 0;
+int patternStep = 0;
 
 //************************BLE*******************************
 /* UUIDs */
@@ -73,10 +78,35 @@ Serial.println(value);
       Serial.println(baseEpoch);
       Serial.println("Handshake successful!");
 
-      needCalibration = true;
-
       return;
     }
+
+    // ---------- CALIBRATION ---------- 
+if (value == "C1") {
+  needCalibration = true;
+  Serial.println("Calibration triggered by app (C1)");
+  return;
+}
+
+// ------- VIBRATION PATTERNS ----------
+if (value.startsWith("S")) {
+  int patNum = value.substring(1).toInt();
+
+  if (patNum >= 1 && patNum <= 6) {
+    ledcWrite(VIBRATION_PIN, 0);  // stop current before switching
+
+    currentPattern = patNum;
+    patternRunning = true;
+    patternStep = 0;
+    patternTimer = millis();
+
+    Serial.print("Pattern started: S");
+    Serial.println(patNum);
+  } else {
+    Serial.println("Invalid pattern number");
+  }
+  return;
+}
 
 // ------- MOTOR INTENSITY CONTROL ----------
 if (value.startsWith("V")) {
@@ -97,40 +127,23 @@ if (value.startsWith("V")) {
     return;
   }
 
-  // Update motor intensity if motor is already ON
-  if (motorEnabled) {
-    ledcWrite(VIBRATION_PIN, vibrationIntensity);
-    Serial.print("Motor PWM updated to ");
-    Serial.println(vibrationIntensity);
+  // ✅ Update intensity live if pattern is running
+  if (patternRunning) {
+    Serial.println("Intensity updated, applies on next pattern cycle");
   }
 
   return;
 }
 
-if (value == "1") {
-
-  if (vibrationIntensity == 0) {
-    Serial.println("Motor not started (intensity = 0)");
-    return;
-  }
-
-  motorEnabled = true;
-
-  Serial.print("Motor ON with PWM: ");
-  Serial.println(vibrationIntensity);
-
-  ledcWrite(VIBRATION_PIN, vibrationIntensity);
-
-  return;
-}
 
 if (value == "0") {
-  motorEnabled = false;
+  // Stop pattern too
+  patternRunning = false;
+  patternStep = 0;
+  currentPattern = 0;
 
   Serial.println("Motor OFF");
-
   ledcWrite(VIBRATION_PIN, 0);
-
   return;
 }
 
@@ -147,13 +160,16 @@ class ServerCallbacks : public BLEServerCallbacks {
   }
 
 void onDisconnect(BLEServer* server) override {
-  motorEnabled       = false;
-  vibrationIntensity = 0;
+  vibrationIntensity = 127;
+  patternRunning     = false;   // ✅ add
+  patternStep        = 0;       // ✅ add
+  currentPattern     = 0;       // ✅ add
   ledcWrite(VIBRATION_PIN, 0);
 
   deviceConnected     = false;
   timeSynced          = false;
-  previouslyConnected = true;   // ← let loop() restart ads safely
+  isCalibrated        = false;
+  previouslyConnected = true;
 
   Serial.println("[BLE] Client disconnected — motor stopped");
 }
@@ -286,6 +302,64 @@ Serial.println("Waiting for phone connection...");
 Serial.println("================================");
 }
 
+/* ================= Vibration Patterns ================= */
+void runVibrationPattern() {
+  if (!patternRunning) return;
+
+  unsigned long now = millis();
+
+  switch (currentPattern) {
+
+    case 1: // S1 - Short (loops: 200ms ON, 300ms OFF)
+      if (patternStep == 0) { ledcWrite(VIBRATION_PIN, vibrationIntensity); patternTimer = now; patternStep++; }
+      else if (patternStep == 1 && now - patternTimer >= 200) { ledcWrite(VIBRATION_PIN, 0); patternTimer = now; patternStep++; }
+      else if (patternStep == 2 && now - patternTimer >= 300) { patternStep = 0; } // ✅ loop
+      break;
+
+    case 2: // S2 - Medium (loops: 500ms ON, 300ms OFF)
+      if (patternStep == 0) { ledcWrite(VIBRATION_PIN, vibrationIntensity); patternTimer = now; patternStep++; }
+      else if (patternStep == 1 && now - patternTimer >= 500) { ledcWrite(VIBRATION_PIN, 0); patternTimer = now; patternStep++; }
+      else if (patternStep == 2 && now - patternTimer >= 300) { patternStep = 0; } // ✅ loop
+      break;
+
+    case 3: // S3 - Long (loops: 1000ms ON, 300ms OFF)
+      if (patternStep == 0) { ledcWrite(VIBRATION_PIN, vibrationIntensity); patternTimer = now; patternStep++; }
+      else if (patternStep == 1 && now - patternTimer >= 1000) { ledcWrite(VIBRATION_PIN, 0); patternTimer = now; patternStep++; }
+      else if (patternStep == 2 && now - patternTimer >= 300) { patternStep = 0; } // ✅ loop
+      break;
+
+    case 4: // S4 - Tuk Tuk (loops: tuk-tuk pause repeat)
+      if (patternStep == 0) { ledcWrite(VIBRATION_PIN, vibrationIntensity); patternTimer = now; patternStep++; }
+      else if (patternStep == 1 && now - patternTimer >= 150) { ledcWrite(VIBRATION_PIN, 0); patternTimer = now; patternStep++; }
+      else if (patternStep == 2 && now - patternTimer >= 100) { ledcWrite(VIBRATION_PIN, vibrationIntensity); patternTimer = now; patternStep++; }
+      else if (patternStep == 3 && now - patternTimer >= 150) { ledcWrite(VIBRATION_PIN, 0); patternTimer = now; patternStep++; }
+      else if (patternStep == 4 && now - patternTimer >= 400) { patternStep = 0; } // ✅ loop
+      break;
+
+    case 5: // S5 - Knock Knock (loops: knock-knock pause repeat)
+      if (patternStep == 0) { ledcWrite(VIBRATION_PIN, vibrationIntensity); patternTimer = now; patternStep++; }
+      else if (patternStep == 1 && now - patternTimer >= 200) { ledcWrite(VIBRATION_PIN, 0); patternTimer = now; patternStep++; }
+      else if (patternStep == 2 && now - patternTimer >= 300) { ledcWrite(VIBRATION_PIN, vibrationIntensity); patternTimer = now; patternStep++; }
+      else if (patternStep == 3 && now - patternTimer >= 200) { ledcWrite(VIBRATION_PIN, 0); patternTimer = now; patternStep++; }
+      else if (patternStep == 4 && now - patternTimer >= 500) { patternStep = 0; } // ✅ loop
+      break;
+
+    case 6: // S6 - Heartbeat (already looping — no change needed)
+      if (patternStep == 0) { ledcWrite(VIBRATION_PIN, vibrationIntensity); patternTimer = now; patternStep++; }
+      else if (patternStep == 1 && now - patternTimer >= 100) { ledcWrite(VIBRATION_PIN, 0); patternTimer = now; patternStep++; }
+      else if (patternStep == 2 && now - patternTimer >= 100) { ledcWrite(VIBRATION_PIN, vibrationIntensity); patternTimer = now; patternStep++; }
+      else if (patternStep == 3 && now - patternTimer >= 100) { ledcWrite(VIBRATION_PIN, 0); patternTimer = now; patternStep++; }
+      else if (patternStep == 4 && now - patternTimer >= 500) { patternStep = 0; } // ✅ already loops
+      break;
+
+    default:
+      patternRunning = false;
+      patternStep = 0;
+      ledcWrite(VIBRATION_PIN, 0);
+      break;
+  }
+}
+
 /* ================= LOOP ================= */
 void loop() {
     // ---- RUN ONLY AFTER HANDSHAKE ----
@@ -310,19 +384,21 @@ if (!deviceConnected) {
   }
 
   // ---- CALIBRATION ----
-  if (needCalibration) {
-    calibrateMPU();
+if (needCalibration) {
+  calibrateMPU();
+  angle = 0;
+  bias = 0;
+  P[0][0] = P[0][1] = P[1][0] = P[1][1] = 0;
+  lastTime = millis();
+  lastPrintTime = millis();
+  needCalibration = false;
+  isCalibrated = true;  // ✅ add this
+  return;
+}
 
-    // Reset Kalman filter state
-    angle = 0;
-    bias = 0;
-    P[0][0] = P[0][1] = P[1][0] = P[1][1] = 0;
 
-    lastTime = millis();   // reset dt reference
-    lastPrintTime = millis();
-    needCalibration = false;
-    return;
-  }
+// ---- RUN PATTERN ----
+runVibrationPattern();
 
   // ---- SENSOR READ ----
   sensors_event_t a, g, temp;
@@ -330,6 +406,7 @@ if (!deviceConnected) {
 
   unsigned long now = millis();
   dt = (now - lastTime) / 1000.0;
+  if (dt <= 0 || dt > 0.1) dt = 0.02;  //This prevents Kalman from going unstable if there's any delay spike during BLE operations.
   lastTime = now;
 
   double accelPitch = atan2(
@@ -345,6 +422,10 @@ if (!deviceConnected) {
 
 if (now - lastPrintTime >= PRINT_INTERVAL) {
 
+  if (!isCalibrated) {  
+    lastPrintTime = now;
+    return;
+  }
 currentTime = baseEpoch + (millis() - baseMillis) / 1000;
 
   char csvBuffer[32];
